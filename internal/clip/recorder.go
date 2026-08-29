@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+
 package clip
 
 import (
@@ -86,9 +88,21 @@ func (r Recorder) WriteWebM(ctx context.Context, path string, frames []JPEGFrame
 	if err := bundle.Run(ctx, job); err != nil {
 		return fmt.Errorf("encode webm: %w", err)
 	}
-	if err := f.Sync(); err != nil {
-		return err
+
+	// The goav destination may close the writer when the mux job completes.
+	// Do not call Sync on f here: doing so can report os.ErrClosed even
+	// though the WebM was written successfully, which would make the deferred
+	// failure cleanup delete a perfectly good evidence clip. Verify the
+	// finished output by path instead. The deferred Close remains harmless
+	// whether goav already closed the descriptor or not.
+	info, err := os.Stat(path)
+	if err != nil {
+		return fmt.Errorf("verify webm output: %w", err)
 	}
+	if info.Size() == 0 {
+		return fmt.Errorf("verify webm output: encoder produced an empty file")
+	}
+
 	ok = true
 	return nil
 }

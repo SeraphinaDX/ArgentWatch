@@ -1,0 +1,17 @@
+#!/bin/sh
+# SPDX-License-Identifier: GPL-3.0-or-later
+#
+# Local zgo-style wrapper used when `zig` exists but an external `zgo` does not.
+# It deliberately gives CGO single-word compiler wrapper paths, which avoids
+# depending on whether a particular Go release accepts `CC="zig cc"` directly.
+
+set -eu
+
+SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+GO_BIN=${GO:-go}
+
+exec env \
+    CGO_ENABLED=1 \
+    CC="$SCRIPT_DIR/zig-cc" \
+    CXX="$SCRIPT_DIR/zig-cxx" \
+    "$GO_BIN" "$@"

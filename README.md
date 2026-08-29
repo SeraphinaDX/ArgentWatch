@@ -4,7 +4,7 @@ ArgentWatch is a Linux webcam intrusion monitor written in Go. It watches a V4L2
 
 ## Design goals
 
-- **Pure Go runtime:** `CGO_ENABLED=0`; no OpenCV, ffmpeg, GStreamer, or C compiler at runtime.
+- **Zig-aware builds:** ArgentWatch prefers an external `zgo` wrapper when one exists. If `zgo` is absent but the normal `zig` executable is installed, ArgentWatch automatically uses its bundled zgo-style wrapper so CGO invokes `zig cc` and `zig c++`. Only when neither `zgo` nor `zig` exists does it fall back to ordinary CGO with the system C/C++ compiler.
 - **Linux/V4L2 camera capture:** the camera must expose MJPEG, which keeps capture overhead low and lets ArgentWatch retain compressed pre-roll frames.
 - **Pure-Go WebM:** recorded JPEG frames are decoded, converted to I420, encoded as VP8, and muxed as WebM in-process.
 - **Useful alerts:** Gotify fires immediately when an intrusion begins; e-mail fires after the evidence clip has been finalized so an external sender can attach it.
@@ -16,9 +16,38 @@ ArgentWatch is a Linux webcam intrusion monitor written in Go. It watches a V4L2
 - Linux with V4L2 (`/dev/video*`).
 - A webcam that supports MJPEG at the configured resolution.
 - Go 1.26+.
+- Zig is optional but preferred when available; a normal `zig` installation is detected automatically.
 - For e-mail, whatever external command you configure (for example your JMAP sender).
 
-ArgentWatch itself does **not** use CGO. The Makefile explicitly builds with `CGO_ENABLED=0`, so Zig/`zig cc` is unnecessary for this version. If a future optional backend introduces CGO, build that backend with Zig as the C compiler rather than relying on the host GCC toolchain.
+ArgentWatch currently has no direct CGO code, and its current video/TUI dependencies are pure Go. The build driver still enforces a compiler preference for any present or future CGO dependency:
+
+1. Use an external **`zgo`** command if one is installed.
+2. Otherwise, if **`zig`** is installed, use ArgentWatch's bundled `scripts/zgo` wrapper. That wrapper sets `CC` and `CXX` to small local launchers that execute `zig cc` and `zig c++`.
+3. Only if neither `zgo` nor `zig` is available, use ordinary Go with `CGO_ENABLED=1` and the system C/C++ compiler.
+
+A normal Zig installation provides the command `zig`; it does **not** have to provide a separate `zgo` executable for ArgentWatch to use Zig.
+
+You can see exactly which path will be selected with:
+
+```sh
+make toolchain
+```
+
+Typical output on a machine with Zig installed is:
+
+```text
+bundled zgo wrapper -> /usr/bin/zig cc/c++
+```
+
+Override executable names or paths if needed:
+
+```sh
+make build ZGO=/path/to/zgo
+make build ZIG=/path/to/zig
+make build GO=/path/to/go
+```
+
+The intended order is therefore: **external zgo -> installed Zig -> ordinary CGO fallback**.
 
 ## Build
 
@@ -192,3 +221,11 @@ Try lower resolutions/FPS first on older hardware. `1280x720 @ 10 fps` is a reas
 ## Privacy/security notes
 
 ArgentWatch does not expose a web server or camera stream. Gotify sends only alert text. The e-mail attachment path is handed to the external command only after the clip is closed. Treat the output and state directories as sensitive, and use disk encryption/appropriate retention for your environment.
+
+## License
+
+ArgentWatch is free software licensed under the **GNU General Public License, version 3 or (at your option) any later version** (`GPL-3.0-or-later`).
+
+You may redistribute and/or modify ArgentWatch under the terms of the GNU General Public License as published by the Free Software Foundation, either version 3 of the License, or any later version.
+
+See [`LICENSE`](LICENSE) for the complete GNU GPL version 3 license text.

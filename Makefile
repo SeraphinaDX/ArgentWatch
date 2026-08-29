@@ -1,16 +1,24 @@
 APP := ArgentWatch
 PKG := ./cmd/argentwatch
+GO_DRIVER := ./scripts/go-toolchain.sh
+ZGO ?= zgo
+ZIG ?= zig
+GO ?= go
 
-.PHONY: build test vet clean install
+.PHONY: build test vet clean install toolchain
 
 build:
-	CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o $(APP) $(PKG)
+	ZGO="$(ZGO)" ZIG="$(ZIG)" GO="$(GO)" $(GO_DRIVER) build -trimpath -ldflags="-s -w" -o $(APP) $(PKG)
 
 test:
-	CGO_ENABLED=0 go test ./...
+	ZGO="$(ZGO)" ZIG="$(ZIG)" GO="$(GO)" $(GO_DRIVER) test ./...
 
 vet:
-	CGO_ENABLED=0 go vet ./...
+	ZGO="$(ZGO)" ZIG="$(ZIG)" GO="$(GO)" $(GO_DRIVER) vet ./...
+
+# Show the exact build path without compiling anything.
+toolchain:
+	@ZGO="$(ZGO)" ZIG="$(ZIG)" GO="$(GO)" $(GO_DRIVER) --print
 
 install: build
 	install -Dm755 $(APP) $(HOME)/bin/$(APP)
