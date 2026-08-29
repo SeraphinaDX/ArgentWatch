@@ -1,0 +1,47 @@
+# ArgentWatch example configuration.
+# Copy to ~/.config/argentwatch/config.toml or use -config=/path/file.toml.
+
+[general]
+output_dir = "~/.local/share/argentwatch/intrusions"
+state_dir = "~/.local/state/argentwatch"
+location = "Computer"
+keep_clips = 200
+max_history = 100
+
+[camera]
+device = "/dev/video0"
+width = 1280
+height = 720
+fps = 10
+frame_timeout_ms = 2000
+
+[motion]
+analysis_width = 64
+analysis_height = 36
+pixel_threshold = 24
+changed_ratio = 0.025
+consecutive_frames = 3
+warmup_frames = 15
+cooldown_seconds = 20
+background_blend = 0.04
+
+[clip]
+pre_seconds = 3
+post_seconds = 7
+bitrate = 1800000
+
+[gotify]
+enabled = false
+url = "https://notify.example.com"
+token_env = "ARGENTWATCH_GOTIFY_TOKEN"
+# token = "APP_TOKEN_HERE"
+priority = 8
+title = "ArgentWatch intrusion"
+
+[email]
+enabled = false
+to = ["security@example.com"]
+timeout_seconds = 30
+subject = "ArgentWatch intrusion at {location}"
+command = "MailSalonSync"
+args = ["-plain", "jmap", "send", "--to", "{to}", "--subject", "{subject}", "--body", "{body}", "--attach", "{clip}"]
