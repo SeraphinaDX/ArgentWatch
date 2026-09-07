@@ -49,9 +49,11 @@ type MotionConfig struct {
 }
 
 type ClipConfig struct {
-	PreSeconds  int `toml:"pre_seconds"`
-	PostSeconds int `toml:"post_seconds"`
-	Bitrate     int `toml:"bitrate"`
+	PreSeconds       int    `toml:"pre_seconds"`
+	PostSeconds      int    `toml:"post_seconds"`
+	Bitrate          int    `toml:"bitrate"`
+	TimestampOverlay bool   `toml:"timestamp_overlay"`
+	TimestampFormat  string `toml:"timestamp_format"`
 }
 
 type GotifyConfig struct {
@@ -99,9 +101,11 @@ func Default() Config {
 			BackgroundBlend: 0.04,
 		},
 		Clip: ClipConfig{
-			PreSeconds:  3,
-			PostSeconds: 7,
-			Bitrate:     1_800_000,
+			PreSeconds:       3,
+			PostSeconds:      7,
+			Bitrate:          1_800_000,
+			TimestampOverlay: true,
+			TimestampFormat:  "2006-01-02 15:04:05",
 		},
 		Gotify: GotifyConfig{
 			TokenEnv: "ARGENTWATCH_GOTIFY_TOKEN",
@@ -250,6 +254,8 @@ background_blend = 0.04
 pre_seconds = 3
 post_seconds = 7
 bitrate = 1800000
+timestamp_overlay = true
+timestamp_format = "2006-01-02 15:04:05"
 
 [gotify]
 enabled = false

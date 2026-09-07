@@ -29,6 +29,8 @@ background_blend = 0.04
 pre_seconds = 3
 post_seconds = 7
 bitrate = 1800000
+timestamp_overlay = true
+timestamp_format = "2006-01-02 15:04:05"
 
 [gotify]
 enabled = false

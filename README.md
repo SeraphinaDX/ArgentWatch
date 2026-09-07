@@ -9,6 +9,8 @@ ArgentWatch is a Linux webcam intrusion monitor written in Go. It watches a V4L2
 - **Pure-Go WebM:** recorded JPEG frames are decoded, converted to I420, encoded as VP8, and muxed as WebM in-process.
 - **Useful alerts:** Gotify fires immediately when an intrusion begins; e-mail fires after the evidence clip has been finalized so an external sender can attach it.
 - **Persistent history:** completed incidents are appended to `events.jsonl` and reloaded in the TUI after restart.
+- **Evidence timestamps:** every saved video frame can carry its own visible date/time overlay using a built-in bitmap font, with no system-font dependency.
+- **Safe visible shutdown:** quitting keeps the TUI/headless status alive while evidence clips and alert tasks finish, and exits automatically only when finalization is complete.
 - **No shell execution:** the e-mail command is executed directly with argument placeholders rather than via `/bin/sh`.
 
 ## Requirements
@@ -85,7 +87,7 @@ Use another config with:
 ./ArgentWatch -config=/path/to/argentwatch.toml
 ```
 
-Press `q` or `Ctrl+C` to exit the TUI.
+Press `q` or `Ctrl+C` to request a graceful exit. If a clip or notification is still being finalized, the TUI remains on screen with a prominent **DO NOT TERMINATE** message and ArgentWatch exits automatically when it is safe.
 
 ## What the TUI shows
 
@@ -95,6 +97,7 @@ The gotui display contains:
 - live motion percentage and trigger threshold;
 - a low-bandwidth luminance preview of the camera;
 - active recording/cooldown state;
+- active WebM encoding/finalization state, including a shutdown warning while evidence is still being written;
 - persistent intrusion history with clip/error state;
 - the most recent operational message.
 
@@ -125,9 +128,11 @@ For false positives, raise `pixel_threshold`, `changed_ratio`, or `consecutive_f
 pre_seconds = 3
 post_seconds = 7
 bitrate = 1800000
+timestamp_overlay = true
+timestamp_format = "2006-01-02 15:04:05"
 ```
 
-With the default values, each intrusion contains about three seconds before the trigger and seven seconds after it. Files are named like:
+With the default values, each intrusion contains about three seconds before the trigger and seven seconds after it. `timestamp_overlay` burns the actual capture date/time into each frame of the WebM, including pre-roll. `timestamp_format` uses Go time-layout syntax; the default produces `YYYY-MM-DD HH:MM:SS`. The overlay uses a built-in bitmap font so it also works on headless systems. Files are named like:
 
 ```text
 intrusion-20260829-140155-a1b2c3d4.webm
@@ -204,7 +209,7 @@ For a long-running service without a terminal:
 ./ArgentWatch -headless
 ```
 
-The same monitoring, recording, Gotify, e-mail, and persistent history operate without gotui. To inspect recent incidents later:
+The same monitoring, recording, Gotify, e-mail, and persistent history operate without gotui. During shutdown, headless mode prints finalization progress once per second and does not return until pending evidence/notification work is complete. To inspect recent incidents later:
 
 ```sh
 ./ArgentWatch -history

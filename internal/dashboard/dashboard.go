@@ -20,21 +20,38 @@ func Run(ctx context.Context, cancel context.CancelFunc, rt *app.Runtime) error 
 	}
 	defer ui.Close()
 
-	events := ui.PollEventsWithContext(ctx)
+	events := ui.PollEvents()
+	shutdownSignal := ctx.Done()
+	shuttingDown := false
 	tick := time.NewTicker(250 * time.Millisecond)
 	defer tick.Stop()
+
+	requestShutdown := func() {
+		if shuttingDown {
+			return
+		}
+		shuttingDown = true
+		rt.BeginShutdown()
+		cancel()
+		shutdownSignal = nil
+		render(rt.Snapshot(), rt.Config().General.Location, rt.Config().General.OutputDir)
+	}
+
 	for {
 		select {
-		case <-ctx.Done():
+		case <-rt.Done():
 			return nil
+		case <-shutdownSignal:
+			requestShutdown()
 		case e, ok := <-events:
 			if !ok {
-				return nil
+				events = nil
+				requestShutdown()
+				continue
 			}
 			switch e.ID {
 			case "q", "<C-c>":
-				cancel()
-				return nil
+				requestShutdown()
 			}
 		case <-tick.C:
 			render(rt.Snapshot(), rt.Config().General.Location, rt.Config().General.OutputDir)
@@ -54,7 +71,7 @@ func render(s app.Snapshot, location, outputDir string) {
 		return
 	}
 	left := w * 2 / 3
-	topH := 8
+	topH := 9
 	footerY := h - 3
 
 	status := widgets.NewParagraph()
@@ -71,7 +88,11 @@ func render(s app.Snapshot, location, outputDir string) {
 	if time.Now().Before(s.CooldownUntil) {
 		cool = time.Until(s.CooldownUntil).Round(time.Second).String()
 	}
-	status.Text = fmt.Sprintf("Location: %s\nCamera: %s  %dx%d @ %.1f fps\nFrames: %d  Last: %s\nMotion: %.1f%%  Trigger: %.1f%%\nRecording: %s  Cooldown: %s", location, cam, s.CameraWidth, s.CameraHeight, s.FPS, s.Frames, age(s.LastFrame), s.MotionScore*100, s.MotionThreshold*100, recording, cool)
+	shutdown := "No"
+	if s.ShuttingDown {
+		shutdown = fmt.Sprintf("YES — clips finalizing: %d, tasks pending: %d", s.FinalizingClips, s.PendingTasks)
+	}
+	status.Text = fmt.Sprintf("Location: %s\nCamera: %s  %dx%d @ %.1f fps\nFrames: %d  Last: %s\nMotion: %.1f%%  Trigger: %.1f%%\nRecording: %s  Cooldown: %s\nShutdown: %s", location, cam, s.CameraWidth, s.CameraHeight, s.FPS, s.Frames, age(s.LastFrame), s.MotionScore*100, s.MotionThreshold*100, recording, cool, shutdown)
 	status.SetRect(0, 0, left, topH)
 	status.BorderStyle.Fg = ui.ColorHotPink
 	status.TitleStyle.Fg = ui.ColorPink
@@ -90,9 +111,24 @@ func render(s app.Snapshot, location, outputDir string) {
 
 	alert := widgets.NewParagraph()
 	alert.Title = " Current State "
-	if s.Recording {
+	if s.ShuttingDown {
+		alert.Title = " FINALIZING / DO NOT TERMINATE "
+		switch {
+		case s.FinalizingClips > 0:
+			alert.Text = fmt.Sprintf("SAVING EVIDENCE — %d clip(s)\nDO NOT KILL ARGENTWATCH", s.FinalizingClips)
+		case s.PendingTasks > 0:
+			alert.Text = fmt.Sprintf("FINISHING ALERTS — %d task(s)\nDO NOT KILL ARGENTWATCH", s.PendingTasks)
+		default:
+			alert.Text = "STOPPING CAMERA / FLUSHING STATE\nDO NOT KILL ARGENTWATCH"
+		}
+		alert.TextStyle = ui.NewStyle(ui.ColorYellow)
+	} else if s.Recording {
 		alert.Text = "⚠ INTRUSION ACTIVE\nRecording evidence clip"
 		alert.TextStyle = ui.NewStyle(ui.ColorRed)
+	} else if s.FinalizingClips > 0 {
+		alert.Title = " Saving Evidence "
+		alert.Text = fmt.Sprintf("ENCODING WEBM — %d clip(s)\nClip is not safe to terminate yet", s.FinalizingClips)
+		alert.TextStyle = ui.NewStyle(ui.ColorYellow)
 	} else if time.Now().Before(s.CooldownUntil) {
 		alert.Text = "Intrusion recorded\nCooldown active"
 		alert.TextStyle = ui.NewStyle(ui.ColorYellow)
@@ -120,7 +156,9 @@ func render(s app.Snapshot, location, outputDir string) {
 
 	footer := widgets.NewParagraph()
 	footer.Text = " q Quit   •   clips: " + filepath.Clean(outputDir) + "   •   persistent event history enabled "
-	if len(s.Logs) > 0 {
+	if s.ShuttingDown {
+		footer.Text = fmt.Sprintf("Quit requested — finalizing %d clip(s), %d task(s).\nDO NOT terminate the process; ArgentWatch will exit automatically when safe.", s.FinalizingClips, s.PendingTasks)
+	} else if len(s.Logs) > 0 {
 		footer.Text = s.Logs[len(s.Logs)-1] + "\nq Quit"
 	}
 	footer.SetRect(0, footerY, w, h)

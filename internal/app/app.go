@@ -31,6 +31,10 @@ type Snapshot struct {
 	MotionThreshold           float64
 	Recording                 bool
 	RecordingUntil            time.Time
+	FinalizingClips           int
+	PendingTasks              int
+	ShuttingDown              bool
+	ShutdownComplete          bool
 	CooldownUntil             time.Time
 	Preview                   string
 	LastFrame                 time.Time
@@ -48,6 +52,7 @@ type Runtime struct {
 	active      *incident
 	lastTrigger time.Time
 	wg          sync.WaitGroup
+	done        chan struct{}
 }
 
 type frame struct {
@@ -97,6 +102,7 @@ func New(cfg config.Config) *Runtime {
 		cfg:   cfg,
 		store: store.Store{Path: filepath.Join(cfg.General.StateDir, "events.jsonl")},
 		ring:  newRing(cfg.Clip.PreSeconds * fps),
+		done:  make(chan struct{}),
 	}
 	r.snap.StartedAt = time.Now()
 	r.snap.MotionThreshold = cfg.Motion.ChangedRatio
@@ -107,6 +113,27 @@ func New(cfg config.Config) *Runtime {
 }
 
 func (r *Runtime) Config() config.Config { return r.cfg }
+
+// Done is closed only after camera capture has stopped and every pending clip,
+// notification, and e-mail task has finished. The dashboard uses this to stay
+// visible during shutdown instead of disappearing while evidence is still being
+// encoded.
+func (r *Runtime) Done() <-chan struct{} { return r.done }
+
+// BeginShutdown marks the runtime as shutting down. It is intentionally
+// idempotent because q, Ctrl-C, SIGTERM, and a monitor error can race with each
+// other.
+func (r *Runtime) BeginShutdown() {
+	r.mu.Lock()
+	already := r.snap.ShuttingDown || r.snap.ShutdownComplete
+	if !r.snap.ShutdownComplete {
+		r.snap.ShuttingDown = true
+	}
+	r.mu.Unlock()
+	if !already {
+		r.logf("shutdown requested: finalizing pending evidence; do not terminate ArgentWatch")
+	}
+}
 
 func (r *Runtime) Snapshot() Snapshot {
 	r.mu.RLock()
@@ -129,8 +156,15 @@ func (r *Runtime) logf(format string, args ...any) {
 
 func (r *Runtime) Run(ctx context.Context) error {
 	defer func() {
+		r.BeginShutdown()
 		r.flushActive()
 		r.wg.Wait()
+		r.mu.Lock()
+		r.snap.CameraOnline = false
+		r.snap.ShuttingDown = false
+		r.snap.ShutdownComplete = true
+		r.mu.Unlock()
+		close(r.done)
 	}()
 	if err := os.MkdirAll(r.cfg.General.OutputDir, 0o700); err != nil {
 		return err
@@ -228,9 +262,17 @@ func (r *Runtime) ingest(ctx context.Context, f frame, m motion.Result) {
 }
 
 func (r *Runtime) background(fn func()) {
+	r.mu.Lock()
+	r.snap.PendingTasks++
+	r.mu.Unlock()
 	r.wg.Add(1)
 	go func() {
-		defer r.wg.Done()
+		defer func() {
+			r.mu.Lock()
+			r.snap.PendingTasks--
+			r.mu.Unlock()
+			r.wg.Done()
+		}()
 		fn()
 	}()
 }
@@ -264,11 +306,20 @@ func (r *Runtime) sendGotify(ctx context.Context, inc *incident) {
 }
 
 func (r *Runtime) finalize(ctx context.Context, inc *incident) {
+	r.mu.Lock()
+	r.snap.FinalizingClips++
+	r.mu.Unlock()
+	defer func() {
+		r.mu.Lock()
+		r.snap.FinalizingClips--
+		r.mu.Unlock()
+	}()
+
 	stamp := inc.started.Format("20060102-150405")
 	path := filepath.Join(r.cfg.General.OutputDir, fmt.Sprintf("intrusion-%s-%s.webm", stamp, inc.id))
 	frames := make([]clip.JPEGFrame, len(inc.frames))
 	for i, f := range inc.frames {
-		frames[i] = clip.JPEGFrame{JPEG: f.jpeg}
+		frames[i] = clip.JPEGFrame{JPEG: f.jpeg, At: f.at}
 	}
 	fps := int(math.Round(float64(r.cfg.Camera.FPS)))
 	if fps < 1 {
@@ -280,7 +331,10 @@ func (r *Runtime) finalize(ctx context.Context, inc *incident) {
 	if width < 1 || height < 1 {
 		width, height = int(r.cfg.Camera.Width), int(r.cfg.Camera.Height)
 	}
-	recorder := clip.Recorder{Width: width, Height: height, FPS: fps, Bitrate: r.cfg.Clip.Bitrate}
+	recorder := clip.Recorder{
+		Width: width, Height: height, FPS: fps, Bitrate: r.cfg.Clip.Bitrate,
+		TimestampOverlay: r.cfg.Clip.TimestampOverlay, TimestampFormat: r.cfg.Clip.TimestampFormat,
+	}
 	r.logf("encoding %s (%d frames)", inc.id, len(frames))
 	err := recorder.WriteWebM(ctx, path, frames)
 	e := store.Event{ID: inc.id, StartedAt: inc.started, SavedAt: time.Now(), Location: r.cfg.General.Location, PeakScore: inc.peak}

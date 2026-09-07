@@ -10,6 +10,7 @@ import (
 	"image/color"
 	"image/jpeg"
 	"os"
+	"time"
 
 	"github.com/thesyncim/goav"
 	"github.com/thesyncim/goav/av"
@@ -21,12 +22,15 @@ import (
 
 type JPEGFrame struct {
 	JPEG []byte
+	At   time.Time
 }
 
 type Recorder struct {
-	Width, Height int
-	FPS           int
-	Bitrate       int
+	Width, Height    int
+	FPS              int
+	Bitrate          int
+	TimestampOverlay bool
+	TimestampFormat  string
 }
 
 func (r Recorder) WriteWebM(ctx context.Context, path string, frames []JPEGFrame) error {
@@ -65,6 +69,17 @@ func (r Recorder) WriteWebM(ctx context.Context, path string, frames []JPEGFrame
 					return fmt.Errorf("decode frame %d: %w", i, err)
 				}
 				y, u, v := toI420(img, r.Width, r.Height)
+				if r.TimestampOverlay {
+					stampTime := jf.At
+					if stampTime.IsZero() {
+						stampTime = time.Now()
+					}
+					format := r.TimestampFormat
+					if format == "" {
+						format = "2006-01-02 15:04:05"
+					}
+					drawTimestampI420(y, u, v, r.Width, r.Height, stampTime.Format(format))
+				}
 				frame := av.Frame{
 					StreamID: av.StreamID("camera"),
 					Type:     av.MediaVideo,

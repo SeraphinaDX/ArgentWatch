@@ -76,23 +76,35 @@ func main() {
 }
 
 func headlessLoop(ctx context.Context, cancel context.CancelFunc, rt *app.Runtime, errCh <-chan error) {
-	ticker := time.NewTicker(10 * time.Second)
+	ticker := time.NewTicker(1 * time.Second)
 	defer ticker.Stop()
 	lastEvents := -1
+	shutdownSignal := ctx.Done()
+	shuttingDown := false
 	for {
 		select {
 		case err := <-errCh:
 			if err != nil {
 				fatal(err)
 			}
+			if shuttingDown {
+				fmt.Println("ArgentWatch: shutdown complete; all evidence and notifications finalized.")
+			}
 			return
-		case <-ctx.Done():
+		case <-shutdownSignal:
+			shuttingDown = true
+			shutdownSignal = nil
+			rt.BeginShutdown()
 			cancel()
-			return
+			fmt.Println("ArgentWatch: shutdown requested — finalizing evidence; DO NOT terminate the process.")
 		case <-ticker.C:
 			s := rt.Snapshot()
-			if len(s.Events) != lastEvents || s.Recording {
-				fmt.Printf("%s camera=%t motion=%.1f%% recording=%t intrusions=%d\n", time.Now().Format(time.RFC3339), s.CameraOnline, s.MotionScore*100, s.Recording, len(s.Events))
+			if shuttingDown || s.ShuttingDown {
+				fmt.Printf("%s FINALIZING: clips=%d pending_tasks=%d — do not terminate\n", time.Now().Format(time.RFC3339), s.FinalizingClips, s.PendingTasks)
+				continue
+			}
+			if len(s.Events) != lastEvents || s.Recording || s.FinalizingClips > 0 {
+				fmt.Printf("%s camera=%t motion=%.1f%% recording=%t finalizing=%d intrusions=%d\n", time.Now().Format(time.RFC3339), s.CameraOnline, s.MotionScore*100, s.Recording, s.FinalizingClips, len(s.Events))
 				lastEvents = len(s.Events)
 			}
 		}
