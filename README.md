@@ -2,6 +2,8 @@
 
 ArgentWatch is a Linux webcam intrusion monitor written in Go. It watches a V4L2 webcam for motion, keeps a short pre-roll buffer, records a WebM evidence clip when motion crosses the configured threshold, sends Gotify alerts, can invoke an external mail/JMAP sender, and presents a persistent gotui dashboard so you can see what happened while you were away.
 
+![Screenshot](argentwatch.avif)
+
 ## Design goals
 
 - **Zig-aware builds:** ArgentWatch prefers an external `zgo` wrapper when one exists. If `zgo` is absent but the normal `zig` executable is installed, ArgentWatch automatically uses its bundled zgo-style wrapper so CGO invokes `zig cc` and `zig c++`. Only when neither `zgo` nor `zig` exists does it fall back to ordinary CGO with the system C/C++ compiler.
