@@ -5,7 +5,8 @@ ArgentWatch is a Linux webcam intrusion monitor written in Go. It watches a V4L2
 ## Design goals
 
 - **Zig-aware builds:** ArgentWatch prefers an external `zgo` wrapper when one exists. If `zgo` is absent but the normal `zig` executable is installed, ArgentWatch automatically uses its bundled zgo-style wrapper so CGO invokes `zig cc` and `zig c++`. Only when neither `zgo` nor `zig` exists does it fall back to ordinary CGO with the system C/C++ compiler.
-- **Linux/V4L2 camera capture:** the camera must expose MJPEG, which keeps capture overhead low and lets ArgentWatch retain compressed pre-roll frames.
+- **Linux/V4L2 camera capture:** ArgentWatch automatically discovers `/dev/v4l/by-id/*`, `/dev/v4l/by-path/*`, and `/dev/video*` nodes, probes them, and selects a usable MJPEG capture node. A configured device is treated as the preferred node rather than a brittle single choice.
+- **Self-healing camera stream:** transient V4L2 `EAGAIN`/`EINTR` conditions are retried in place. If the stream really fails or stalls for several frame waits, ArgentWatch stays running, marks the camera as reconnecting, closes/reopens it, and retries indefinitely with bounded backoff instead of terminating the surveillance process.
 - **Pure-Go WebM:** recorded JPEG frames are decoded, converted to I420, encoded as VP8, and muxed as WebM in-process.
 - **Useful alerts:** Gotify fires immediately when an intrusion begins; e-mail fires after the evidence clip has been finalized so an external sender can attach it.
 - **Persistent history:** completed incidents are appended to `events.jsonl` and reloaded in the TUI after restart.
@@ -15,7 +16,7 @@ ArgentWatch is a Linux webcam intrusion monitor written in Go. It watches a V4L2
 
 ## Requirements
 
-- Linux with V4L2 (`/dev/video*`).
+- Linux with V4L2 (`/dev/video*`; stable `/dev/v4l/by-id` and `/dev/v4l/by-path` links are used when available).
 - A webcam that supports MJPEG at the configured resolution.
 - Go 1.26+.
 - Zig is optional but preferred when available; a normal `zig` installation is detected automatically.
@@ -75,7 +76,7 @@ This creates:
 ~/.config/argentwatch/config.toml
 ```
 
-Then edit the camera device/resolution and notification settings and run:
+The default camera setting is `device = "auto"`, so most users do not need to identify `/dev/videoN` manually. Then edit the resolution and notification settings and run:
 
 ```sh
 ./ArgentWatch
@@ -93,7 +94,7 @@ Press `q` or `Ctrl+C` to request a graceful exit. If a clip or notification is s
 
 The gotui display contains:
 
-- camera online state, resolution, FPS and last-frame age;
+- camera online/reconnecting state, resolution, FPS, reconnect count and last-frame age;
 - live motion percentage and trigger threshold;
 - a low-bandwidth luminance preview of the camera;
 - active recording/cooldown state;
@@ -219,7 +220,26 @@ For a desktop machine, running ArgentWatch in tmux is a simple way to keep the f
 
 ## Camera notes
 
-The initial implementation intentionally requires MJPEG from the webcam. You can inspect camera formats with tools such as `v4l2-ctl --list-formats-ext`. If your camera only exposes YUYV/NV12, add a conversion capture backend rather than silently depending on ffmpeg.
+Use automatic discovery unless you have a reason to pin a camera:
+
+```toml
+[camera]
+device = "auto"
+```
+
+ArgentWatch checks stable `/dev/v4l/by-id/*` names first, then `/dev/v4l/by-path/*`, then numbered `/dev/video*` nodes. If an existing config still says `/dev/video0`, that path is tried first but ArgentWatch now continues probing the other nodes when it is missing, metadata-only, busy, non-MJPEG, or otherwise unusable. The selected device is shown in the TUI.
+
+Camera errors after startup are not fatal. ArgentWatch retries harmless non-blocking/signal interruptions (`EAGAIN`/`EINTR`) without reopening the device. Other read errors trigger an automatic stream reopen. If no frames arrive for three consecutive `frame_timeout_ms` periods, the stream is considered stalled and is reopened as well. Ten consecutive corrupt/undecodable MJPEG frames also force a reopen. Reconnection retries continue indefinitely, backing off from one second to a maximum of 15 seconds while the TUI remains available. If a camera interruption occurs during an intrusion, the partial evidence clip is finalized rather than discarded, and the pre-roll/motion baseline is reset before the new stream is monitored.
+
+For diagnostics, run:
+
+```sh
+./ArgentWatch -list-cameras
+```
+
+This reports every V4L2 node ArgentWatch can see and whether it advertises MJPEG. If all nodes fail with `permission denied`, check your session/device permissions; if no nodes appear at all, verify that the webcam is exposed through V4L2 rather than only through another camera stack.
+
+The current capture path intentionally requires MJPEG from the webcam. You can inspect a specific node in more detail with `v4l2-ctl --device=/dev/videoN --list-formats-ext`. If your camera only exposes YUYV/NV12, a conversion capture backend is needed rather than silently depending on ffmpeg.
 
 Try lower resolutions/FPS first on older hardware. `1280x720 @ 10 fps` is a reasonable default for motion detection and short evidence clips.
 

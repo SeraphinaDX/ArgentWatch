@@ -84,7 +84,7 @@ func Default() Config {
 			MaxHistory: 100,
 		},
 		Camera: CameraConfig{
-			Device:         "/dev/video0",
+			Device:         "auto",
 			Width:          1280,
 			Height:         720,
 			FPS:            10,
@@ -135,8 +135,8 @@ func Load(path string) (Config, error) {
 
 func (c Config) Validate() error {
 	var errs []string
-	if c.Camera.Device == "" {
-		errs = append(errs, "camera.device is required")
+	if strings.TrimSpace(c.Camera.Device) == "" {
+		errs = append(errs, "camera.device is required (use \"auto\" for automatic discovery)")
 	}
 	if c.Camera.Width == 0 || c.Camera.Height == 0 {
 		errs = append(errs, "camera width/height must be non-zero")
@@ -234,7 +234,7 @@ keep_clips = 200
 max_history = 100
 
 [camera]
-device = "/dev/video0"
+device = "auto"
 width = 1280
 height = 720
 fps = 10

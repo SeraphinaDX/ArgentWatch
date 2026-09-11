@@ -71,12 +71,15 @@ func render(s app.Snapshot, location, outputDir string) {
 		return
 	}
 	left := w * 2 / 3
-	topH := 9
+	topH := 10
 	footerY := h - 3
 
 	status := widgets.NewParagraph()
 	status.Title = " ArgentWatch / Sentinel Status "
-	cam := "OFFLINE"
+	cam := strings.ToUpper(s.CameraStatus)
+	if cam == "" {
+		cam = "OFFLINE"
+	}
 	if s.CameraOnline {
 		cam = "ONLINE"
 	}
@@ -92,7 +95,11 @@ func render(s app.Snapshot, location, outputDir string) {
 	if s.ShuttingDown {
 		shutdown = fmt.Sprintf("YES — clips finalizing: %d, tasks pending: %d", s.FinalizingClips, s.PendingTasks)
 	}
-	status.Text = fmt.Sprintf("Location: %s\nCamera: %s  %dx%d @ %.1f fps\nFrames: %d  Last: %s\nMotion: %.1f%%  Trigger: %.1f%%\nRecording: %s  Cooldown: %s\nShutdown: %s", location, cam, s.CameraWidth, s.CameraHeight, s.FPS, s.Frames, age(s.LastFrame), s.MotionScore*100, s.MotionThreshold*100, recording, cool, shutdown)
+	cameraDetail := fmt.Sprintf("Camera: %s  %dx%d @ %.1f fps  reconnects: %d", cam, s.CameraWidth, s.CameraHeight, s.FPS, s.CameraReconnects)
+	if s.CameraError != "" && !s.CameraOnline {
+		cameraDetail += "\nLast camera error: " + trim(s.CameraError, 70)
+	}
+	status.Text = fmt.Sprintf("Location: %s\n%s\nDevice: %s\nFrames: %d  Last: %s\nMotion: %.1f%%  Trigger: %.1f%%\nRecording: %s  Cooldown: %s\nShutdown: %s", location, cameraDetail, displayDevice(s.CameraDevice), s.Frames, age(s.LastFrame), s.MotionScore*100, s.MotionThreshold*100, recording, cool, shutdown)
 	status.SetRect(0, 0, left, topH)
 	status.BorderStyle.Fg = ui.ColorHotPink
 	status.TitleStyle.Fg = ui.ColorPink
@@ -121,6 +128,10 @@ func render(s app.Snapshot, location, outputDir string) {
 		default:
 			alert.Text = "STOPPING CAMERA / FLUSHING STATE\nDO NOT KILL ARGENTWATCH"
 		}
+		alert.TextStyle = ui.NewStyle(ui.ColorYellow)
+	} else if !s.CameraOnline && (s.CameraStatus == "reconnecting" || s.CameraStatus == "connecting") {
+		alert.Title = " Camera Reconnect "
+		alert.Text = "CAMERA INTERRUPTED\nReconnecting automatically — ArgentWatch is still running"
 		alert.TextStyle = ui.NewStyle(ui.ColorYellow)
 	} else if s.Recording {
 		alert.Text = "⚠ INTRUSION ACTIVE\nRecording evidence clip"
@@ -203,4 +214,11 @@ func trim(s string, n int) string {
 		return s
 	}
 	return s[:n-1] + "…"
+}
+
+func displayDevice(device string) string {
+	if device == "" {
+		return "probing..."
+	}
+	return device
 }

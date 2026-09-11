@@ -9,7 +9,7 @@ keep_clips = 200
 max_history = 100
 
 [camera]
-device = "/dev/video0"
+device = "auto"
 width = 1280
 height = 720
 fps = 10

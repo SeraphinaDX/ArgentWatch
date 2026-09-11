@@ -25,6 +25,10 @@ import (
 type Snapshot struct {
 	StartedAt                 time.Time
 	CameraOnline              bool
+	CameraStatus              string
+	CameraError               string
+	CameraReconnects          uint64
+	CameraDevice              string
 	CameraWidth, CameraHeight int
 	FPS                       float32
 	MotionScore               float64
@@ -65,6 +69,9 @@ type incident struct {
 	until   time.Time
 	peak    float64
 	frames  []frame
+	width   int
+	height  int
+	fps     float32
 }
 
 type frameRing struct {
@@ -106,6 +113,7 @@ func New(cfg config.Config) *Runtime {
 	}
 	r.snap.StartedAt = time.Now()
 	r.snap.MotionThreshold = cfg.Motion.ChangedRatio
+	r.snap.CameraStatus = "starting"
 	if events, err := r.store.Recent(cfg.General.MaxHistory); err == nil {
 		r.snap.Events = events
 	}
@@ -161,6 +169,7 @@ func (r *Runtime) Run(ctx context.Context) error {
 		r.wg.Wait()
 		r.mu.Lock()
 		r.snap.CameraOnline = false
+		r.snap.CameraStatus = "stopped"
 		r.snap.ShuttingDown = false
 		r.snap.ShutdownComplete = true
 		r.mu.Unlock()
@@ -174,47 +183,152 @@ func (r *Runtime) Run(ctx context.Context) error {
 	}
 	_ = store.PruneClips(r.cfg.General.OutputDir, r.cfg.General.KeepClips)
 
-	r.logf("opening camera %s", r.cfg.Camera.Device)
-	cam, err := camera.Open(camera.Config{
-		Device: r.cfg.Camera.Device, Width: r.cfg.Camera.Width, Height: r.cfg.Camera.Height,
-		FPS: r.cfg.Camera.FPS, TimeoutMS: r.cfg.Camera.FrameTimeoutMS,
-	})
-	if err != nil {
-		r.logf("camera error: %v", err)
-		return err
-	}
-	defer cam.Close()
-	r.mu.Lock()
-	r.snap.CameraOnline = true
-	r.snap.CameraWidth = cam.Width()
-	r.snap.CameraHeight = cam.Height()
-	r.snap.FPS = cam.FPS()
-	r.mu.Unlock()
-	r.logf("camera online: %dx%d MJPEG @ %.1f fps", cam.Width(), cam.Height(), cam.FPS())
-
-	det := motion.New(r.cfg.Motion.AnalysisWidth, r.cfg.Motion.AnalysisHeight, r.cfg.Motion.PixelThreshold,
-		r.cfg.Motion.ChangedRatio, r.cfg.Motion.Consecutive, r.cfg.Motion.WarmupFrames, r.cfg.Motion.BackgroundBlend)
+	const minReconnectDelay = 1 * time.Second
+	const maxReconnectDelay = 15 * time.Second
+	reconnectDelay := minReconnectDelay
+	hadCamera := false
 
 	for {
-		if err := ctx.Err(); err != nil {
+		if ctx.Err() != nil {
 			return nil
+		}
+
+		r.setCameraState(false, "connecting", "")
+		if hadCamera {
+			r.setCameraState(false, "reconnecting", "")
+		} else {
+			r.logf("opening camera (preferred device: %s)", r.cfg.Camera.Device)
+		}
+
+		cam, err := camera.Open(camera.Config{
+			Device: r.cfg.Camera.Device, Width: r.cfg.Camera.Width, Height: r.cfg.Camera.Height,
+			FPS: r.cfg.Camera.FPS, TimeoutMS: r.cfg.Camera.FrameTimeoutMS,
+		})
+		if err != nil {
+			r.setCameraState(false, "reconnecting", err.Error())
+			r.logf("camera unavailable: %v; retrying in %s", err, reconnectDelay)
+			if !sleepContext(ctx, reconnectDelay) {
+				return nil
+			}
+			reconnectDelay *= 2
+			if reconnectDelay > maxReconnectDelay {
+				reconnectDelay = maxReconnectDelay
+			}
+			continue
+		}
+
+		if hadCamera {
+			r.mu.Lock()
+			r.snap.CameraReconnects++
+			r.mu.Unlock()
+			r.logf("camera reconnected: %s — %dx%d MJPEG @ %.1f fps", cam.Device(), cam.Width(), cam.Height(), cam.FPS())
+		} else {
+			r.logf("camera online: %s — %dx%d MJPEG @ %.1f fps", cam.Device(), cam.Width(), cam.Height(), cam.FPS())
+		}
+		hadCamera = true
+		reconnectDelay = minReconnectDelay
+		r.mu.Lock()
+		r.snap.CameraOnline = true
+		r.snap.CameraStatus = "online"
+		r.snap.CameraError = ""
+		r.snap.CameraDevice = cam.Device()
+		r.snap.CameraWidth = cam.Width()
+		r.snap.CameraHeight = cam.Height()
+		r.snap.FPS = cam.FPS()
+		r.mu.Unlock()
+		// Pre-roll must contain frames from only the current stream. Keeping old
+		// frames across a reconnect can mix dimensions/devices in one WebM.
+		ringFPS := int(math.Round(float64(cam.FPS())))
+		if ringFPS < 1 {
+			ringFPS = int(math.Round(float64(r.cfg.Camera.FPS)))
+		}
+		if ringFPS < 1 {
+			ringFPS = 1
+		}
+		r.ring = newRing(r.cfg.Clip.PreSeconds * ringFPS)
+		if cam.Device() != r.cfg.Camera.Device && r.cfg.Camera.Device != "auto" && r.cfg.Camera.Device != "default" {
+			r.logf("preferred camera %s was unavailable/unusable; automatically selected %s", r.cfg.Camera.Device, cam.Device())
+		}
+		for _, warning := range cam.Warnings() {
+			r.logf("camera warning: %s", warning)
+		}
+
+		det := motion.New(r.cfg.Motion.AnalysisWidth, r.cfg.Motion.AnalysisHeight, r.cfg.Motion.PixelThreshold,
+			r.cfg.Motion.ChangedRatio, r.cfg.Motion.Consecutive, r.cfg.Motion.WarmupFrames, r.cfg.Motion.BackgroundBlend)
+
+		err = r.captureSession(ctx, cam, det)
+		_ = cam.Close()
+		r.setCameraState(false, "reconnecting", errorText(err))
+		if ctx.Err() != nil {
+			return nil
+		}
+
+		// Never mix frames from two camera sessions in one evidence file. If
+		// the camera drops during an intrusion, preserve what we captured so
+		// far and begin fresh after reconnection.
+		r.flushActiveAsync("camera stream interrupted")
+		r.logf("camera stream interrupted: %v; reconnecting in %s", err, reconnectDelay)
+		if !sleepContext(ctx, reconnectDelay) {
+			return nil
+		}
+	}
+}
+
+func (r *Runtime) captureSession(ctx context.Context, cam *camera.Camera, det *motion.Detector) error {
+	decodeFailures := 0
+	for {
+		if ctx.Err() != nil {
+			return ctx.Err()
 		}
 		cf, err := cam.Read(ctx, r.cfg.Camera.FrameTimeoutMS)
 		if err != nil {
-			if ctx.Err() != nil {
-				return nil
-			}
-			r.logf("camera read error: %v", err)
 			return err
 		}
+		r.mu.Lock()
+		if r.snap.CameraWidth != cam.Width() || r.snap.CameraHeight != cam.Height() {
+			r.snap.CameraWidth = cam.Width()
+			r.snap.CameraHeight = cam.Height()
+		}
+		r.mu.Unlock()
 		res, err := det.AnalyzeJPEG(cf.JPEG)
 		if err != nil {
+			decodeFailures++
 			r.logf("motion decode error: %v", err)
+			if decodeFailures >= 10 {
+				return fmt.Errorf("camera delivered %d consecutive undecodable MJPEG frames: %w", decodeFailures, err)
+			}
 			continue
 		}
+		decodeFailures = 0
 		f := frame{jpeg: cf.JPEG, at: cf.At}
 		r.ingest(ctx, f, res)
 	}
+}
+
+func (r *Runtime) setCameraState(online bool, status, errText string) {
+	r.mu.Lock()
+	r.snap.CameraOnline = online
+	r.snap.CameraStatus = status
+	r.snap.CameraError = errText
+	r.mu.Unlock()
+}
+
+func sleepContext(ctx context.Context, d time.Duration) bool {
+	t := time.NewTimer(d)
+	defer t.Stop()
+	select {
+	case <-ctx.Done():
+		return false
+	case <-t.C:
+		return true
+	}
+}
+
+func errorText(err error) string {
+	if err == nil {
+		return ""
+	}
+	return err.Error()
 }
 
 func (r *Runtime) ingest(ctx context.Context, f frame, m motion.Result) {
@@ -244,7 +358,10 @@ func (r *Runtime) ingest(ctx context.Context, f frame, m motion.Result) {
 		}
 	} else if m.Triggered && time.Since(r.lastTrigger) >= time.Duration(r.cfg.Motion.CooldownSeconds)*time.Second {
 		pre := r.ring.snapshot()
-		inc := &incident{id: eventID(), started: f.at, until: f.at.Add(time.Duration(r.cfg.Clip.PostSeconds) * time.Second), peak: m.Score, frames: pre}
+		inc := &incident{
+			id: eventID(), started: f.at, until: f.at.Add(time.Duration(r.cfg.Clip.PostSeconds) * time.Second), peak: m.Score, frames: pre,
+			width: r.snap.CameraWidth, height: r.snap.CameraHeight, fps: r.snap.FPS,
+		}
 		r.active = inc
 		started = inc
 		r.snap.Recording = true
@@ -278,6 +395,10 @@ func (r *Runtime) background(fn func()) {
 }
 
 func (r *Runtime) flushActive() {
+	r.flushActiveReason("shutdown")
+}
+
+func (r *Runtime) flushActiveReason(reason string) {
 	r.mu.Lock()
 	inc := r.active
 	if inc != nil {
@@ -287,8 +408,23 @@ func (r *Runtime) flushActive() {
 	}
 	r.mu.Unlock()
 	if inc != nil && len(inc.frames) > 0 {
-		r.logf("shutdown: saving partial intrusion clip %s", inc.id)
+		r.logf("%s: saving partial intrusion clip %s", reason, inc.id)
 		r.finalize(context.Background(), inc)
+	}
+}
+
+func (r *Runtime) flushActiveAsync(reason string) {
+	r.mu.Lock()
+	inc := r.active
+	if inc != nil {
+		r.active = nil
+		r.snap.Recording = false
+		r.snap.RecordingUntil = time.Time{}
+	}
+	r.mu.Unlock()
+	if inc != nil && len(inc.frames) > 0 {
+		r.logf("%s: saving partial intrusion clip %s", reason, inc.id)
+		r.background(func() { r.finalize(context.Background(), inc) })
 	}
 }
 
@@ -321,13 +457,15 @@ func (r *Runtime) finalize(ctx context.Context, inc *incident) {
 	for i, f := range inc.frames {
 		frames[i] = clip.JPEGFrame{JPEG: f.jpeg, At: f.at}
 	}
-	fps := int(math.Round(float64(r.cfg.Camera.FPS)))
+	width, height := inc.width, inc.height
+	actualFPS := inc.fps
+	fps := int(math.Round(float64(actualFPS)))
+	if fps < 1 {
+		fps = int(math.Round(float64(r.cfg.Camera.FPS)))
+	}
 	if fps < 1 {
 		fps = 1
 	}
-	r.mu.RLock()
-	width, height := r.snap.CameraWidth, r.snap.CameraHeight
-	r.mu.RUnlock()
 	if width < 1 || height < 1 {
 		width, height = int(r.cfg.Camera.Width), int(r.cfg.Camera.Height)
 	}

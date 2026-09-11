@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"git.cerberusgames.ca/Starstreak/ArgentWatch/internal/app"
+	"git.cerberusgames.ca/Starstreak/ArgentWatch/internal/camera"
 	"git.cerberusgames.ca/Starstreak/ArgentWatch/internal/config"
 	"git.cerberusgames.ca/Starstreak/ArgentWatch/internal/dashboard"
 	"git.cerberusgames.ca/Starstreak/ArgentWatch/internal/store"
@@ -26,6 +27,7 @@ func main() {
 	initConfig := flag.Bool("init-config", false, "write a default configuration and exit")
 	history := flag.Bool("history", false, "print recent intrusion history and exit")
 	showVersion := flag.Bool("version", false, "print version and exit")
+	listCamerasFlag := flag.Bool("list-cameras", false, "probe available V4L2 camera devices and exit")
 	flag.Parse()
 
 	if *showVersion {
@@ -37,6 +39,14 @@ func main() {
 			fatal(err)
 		}
 		fmt.Printf("Wrote %s\n", config.ExpandPath(*cfgPath))
+		return
+	}
+	if *listCamerasFlag {
+		camCfg := config.Default().Camera
+		if cfg, err := config.Load(*cfgPath); err == nil {
+			camCfg = cfg.Camera
+		}
+		listCameras(camCfg)
 		return
 	}
 	cfg, err := config.Load(*cfgPath)
@@ -79,6 +89,8 @@ func headlessLoop(ctx context.Context, cancel context.CancelFunc, rt *app.Runtim
 	ticker := time.NewTicker(1 * time.Second)
 	defer ticker.Stop()
 	lastEvents := -1
+	lastCameraStatus := ""
+	var lastReconnects uint64
 	shutdownSignal := ctx.Done()
 	shuttingDown := false
 	for {
@@ -103,11 +115,51 @@ func headlessLoop(ctx context.Context, cancel context.CancelFunc, rt *app.Runtim
 				fmt.Printf("%s FINALIZING: clips=%d pending_tasks=%d — do not terminate\n", time.Now().Format(time.RFC3339), s.FinalizingClips, s.PendingTasks)
 				continue
 			}
-			if len(s.Events) != lastEvents || s.Recording || s.FinalizingClips > 0 {
-				fmt.Printf("%s camera=%t motion=%.1f%% recording=%t finalizing=%d intrusions=%d\n", time.Now().Format(time.RFC3339), s.CameraOnline, s.MotionScore*100, s.Recording, s.FinalizingClips, len(s.Events))
+			if len(s.Events) != lastEvents || s.Recording || s.FinalizingClips > 0 || s.CameraStatus != lastCameraStatus || s.CameraReconnects != lastReconnects {
+				fmt.Printf("%s camera=%t status=%s reconnects=%d motion=%.1f%% recording=%t finalizing=%d intrusions=%d", time.Now().Format(time.RFC3339), s.CameraOnline, s.CameraStatus, s.CameraReconnects, s.MotionScore*100, s.Recording, s.FinalizingClips, len(s.Events))
+				if s.CameraError != "" && !s.CameraOnline {
+					fmt.Printf(" error=%q", s.CameraError)
+				}
+				fmt.Println()
 				lastEvents = len(s.Events)
+				lastCameraStatus = s.CameraStatus
+				lastReconnects = s.CameraReconnects
 			}
 		}
+	}
+}
+
+func listCameras(cfg config.CameraConfig) {
+	probes := camera.ProbeDevices(camera.Config{
+		Device: cfg.Device, Width: cfg.Width, Height: cfg.Height, FPS: cfg.FPS, TimeoutMS: cfg.FrameTimeoutMS,
+	})
+	if len(probes) == 0 {
+		fmt.Println("No V4L2 devices found under /dev/video*, /dev/v4l/by-id, or /dev/v4l/by-path.")
+		return
+	}
+	fmt.Printf("ArgentWatch camera probe (preferred: %s; requested mode: %dx%d @ %.1f fps)\n", cfg.Device, cfg.Width, cfg.Height, cfg.FPS)
+	for _, p := range probes {
+		state := "skip"
+		if p.Usable {
+			state = "usable"
+		}
+		fmt.Printf("  %-6s %s", state, p.Device)
+		if p.Name != "" {
+			fmt.Printf("  [%s]", p.Name)
+		}
+		if p.Usable {
+			fmt.Printf("  %dx%d @ %.1f fps", p.Width, p.Height, p.FPS)
+		}
+		if p.Formats != "" {
+			fmt.Printf("\n           formats: %s", p.Formats)
+		}
+		if p.Error != "" {
+			fmt.Printf("\n           error: %s", p.Error)
+		}
+		for _, warning := range p.Warnings {
+			fmt.Printf("\n           warning: %s", warning)
+		}
+		fmt.Println()
 	}
 }
 
