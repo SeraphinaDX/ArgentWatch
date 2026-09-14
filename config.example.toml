@@ -32,6 +32,16 @@ bitrate = 1800000
 timestamp_overlay = true
 timestamp_format = "2006-01-02 15:04:05"
 
+[preview]
+# auto = SIXEL on recognized terminals, otherwise text.
+# Use sixel to force it, text to force the luma preview, or off to disable.
+mode = "auto"
+refresh_ms = 500
+sixel_max_width = 640
+sixel_max_height = 360
+cell_width_px = 8
+cell_height_px = 16
+
 [gotify]
 enabled = false
 url = "https://notify.example.com"

@@ -17,6 +17,7 @@ type Config struct {
 	Camera  CameraConfig  `toml:"camera"`
 	Motion  MotionConfig  `toml:"motion"`
 	Clip    ClipConfig    `toml:"clip"`
+	Preview PreviewConfig `toml:"preview"`
 	Gotify  GotifyConfig  `toml:"gotify"`
 	Email   EmailConfig   `toml:"email"`
 }
@@ -54,6 +55,15 @@ type ClipConfig struct {
 	Bitrate          int    `toml:"bitrate"`
 	TimestampOverlay bool   `toml:"timestamp_overlay"`
 	TimestampFormat  string `toml:"timestamp_format"`
+}
+
+type PreviewConfig struct {
+	Mode           string `toml:"mode"`
+	RefreshMS      int    `toml:"refresh_ms"`
+	SixelMaxWidth  int    `toml:"sixel_max_width"`
+	SixelMaxHeight int    `toml:"sixel_max_height"`
+	CellWidthPX    int    `toml:"cell_width_px"`
+	CellHeightPX   int    `toml:"cell_height_px"`
 }
 
 type GotifyConfig struct {
@@ -106,6 +116,14 @@ func Default() Config {
 			Bitrate:          1_800_000,
 			TimestampOverlay: true,
 			TimestampFormat:  "2006-01-02 15:04:05",
+		},
+		Preview: PreviewConfig{
+			Mode:           "auto",
+			RefreshMS:      500,
+			SixelMaxWidth:  640,
+			SixelMaxHeight: 360,
+			CellWidthPX:    8,
+			CellHeightPX:   16,
 		},
 		Gotify: GotifyConfig{
 			TokenEnv: "ARGENTWATCH_GOTIFY_TOKEN",
@@ -161,6 +179,20 @@ func (c Config) Validate() error {
 	}
 	if c.Clip.Bitrate < 100_000 {
 		errs = append(errs, "clip.bitrate must be at least 100000")
+	}
+	switch strings.ToLower(strings.TrimSpace(c.Preview.Mode)) {
+	case "auto", "text", "sixel", "off":
+	default:
+		errs = append(errs, "preview.mode must be one of auto, text, sixel, off")
+	}
+	if c.Preview.RefreshMS < 100 {
+		errs = append(errs, "preview.refresh_ms must be at least 100")
+	}
+	if c.Preview.SixelMaxWidth < 64 || c.Preview.SixelMaxHeight < 48 {
+		errs = append(errs, "preview SIXEL dimensions are too small")
+	}
+	if c.Preview.CellWidthPX < 1 || c.Preview.CellHeightPX < 1 {
+		errs = append(errs, "preview cell pixel dimensions must be positive")
 	}
 	if c.General.OutputDir == "" || c.General.StateDir == "" {
 		errs = append(errs, "general output_dir/state_dir are required")
@@ -256,6 +288,19 @@ post_seconds = 7
 bitrate = 1800000
 timestamp_overlay = true
 timestamp_format = "2006-01-02 15:04:05"
+
+[preview]
+# auto = use SIXEL when ArgentWatch can identify a compatible terminal,
+# otherwise keep the text/luminance preview. Use sixel to force SIXEL.
+# text forces the existing character preview; off disables camera preview.
+mode = "auto"
+refresh_ms = 500
+sixel_max_width = 640
+sixel_max_height = 360
+# Used to fit the bitmap inside the gotui pane when the terminal does not
+# expose its pixel geometry. Adjust these if SIXEL overlaps the pane border.
+cell_width_px = 8
+cell_height_px = 16
 
 [gotify]
 enabled = false

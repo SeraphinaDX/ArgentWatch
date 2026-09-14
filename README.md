@@ -2,8 +2,6 @@
 
 ArgentWatch is a Linux webcam intrusion monitor written in Go. It watches a V4L2 webcam for motion, keeps a short pre-roll buffer, records a WebM evidence clip when motion crosses the configured threshold, sends Gotify alerts, can invoke an external mail/JMAP sender, and presents a persistent gotui dashboard so you can see what happened while you were away.
 
-![Screenshot](argentwatch.avif)
-
 ## Design goals
 
 - **Zig-aware builds:** ArgentWatch prefers an external `zgo` wrapper when one exists. If `zgo` is absent but the normal `zig` executable is installed, ArgentWatch automatically uses its bundled zgo-style wrapper so CGO invokes `zig cc` and `zig c++`. Only when neither `zgo` nor `zig` exists does it fall back to ordinary CGO with the system C/C++ compiler.
@@ -14,6 +12,7 @@ ArgentWatch is a Linux webcam intrusion monitor written in Go. It watches a V4L2
 - **Persistent history:** completed incidents are appended to `events.jsonl` and reloaded in the TUI after restart.
 - **Evidence timestamps:** every saved video frame can carry its own visible date/time overlay using a built-in bitmap font, with no system-font dependency.
 - **Safe visible shutdown:** quitting keeps the TUI/headless status alive while evidence clips and alert tasks finish, and exits automatically only when finalization is complete.
+- **SIXEL-capable live preview:** terminals with SIXEL support can show a real colour camera image inside the gotui dashboard. The encoder is pure Go and the existing text/luminance preview remains the fallback.
 - **No shell execution:** the e-mail command is executed directly with argument placeholders rather than via `/bin/sh`.
 
 ## Requirements
@@ -23,6 +22,7 @@ ArgentWatch is a Linux webcam intrusion monitor written in Go. It watches a V4L2
 - Go 1.26+.
 - Zig is optional but preferred when available; a normal `zig` installation is detected automatically.
 - For e-mail, whatever external command you configure (for example your JMAP sender).
+- SIXEL is optional. A SIXEL-capable terminal is only required when `[preview] mode = "sixel"` (or when `auto` detects one).
 
 ArgentWatch currently has no direct CGO code, and its current video/TUI dependencies are pure Go. The build driver still enforces a compiler preference for any present or future CGO dependency:
 
@@ -98,13 +98,51 @@ The gotui display contains:
 
 - camera online/reconnecting state, resolution, FPS, reconnect count and last-frame age;
 - live motion percentage and trigger threshold;
-- a low-bandwidth luminance preview of the camera;
+- a live camera preview: SIXEL colour graphics on compatible terminals, otherwise the low-bandwidth luminance/text preview;
 - active recording/cooldown state;
 - active WebM encoding/finalization state, including a shutdown warning while evidence is still being written;
 - persistent intrusion history with clip/error state;
 - the most recent operational message.
 
-The UI refreshes independently of camera capture, so terminal rendering does not block surveillance.
+The UI refreshes independently of camera capture, so terminal rendering does not block surveillance. SIXEL rendering consumes only copies of the newest JPEG frame and never runs in the V4L2 capture goroutine.
+
+## SIXEL camera preview
+
+ArgentWatch can place a real colour camera image inside the gotui preview pane using DEC SIXEL graphics. It includes its own pure-Go JPEG-to-SIXEL encoder, so enabling SIXEL does not require ImageMagick, ffmpeg, libsixel, CGO, or another helper program.
+
+```toml
+[preview]
+mode = "auto"
+refresh_ms = 500
+sixel_max_width = 640
+sixel_max_height = 360
+cell_width_px = 8
+cell_height_px = 16
+```
+
+`mode` accepts:
+
+- `auto` — use SIXEL when ArgentWatch can conservatively identify a compatible terminal; otherwise use the text/luminance preview.
+- `sixel` — force SIXEL. This is useful when your terminal supports SIXEL but uses a generic `TERM=xterm-256color` value.
+- `text` — always use the original luminance preview.
+- `off` — hide camera imagery while keeping motion detection and recording active.
+
+Auto-detection intentionally avoids assuming that every xterm-compatible terminal supports SIXEL. It recognizes explicit `sixel` TERM values and common SIXEL-capable environments such as current Konsole, WezTerm, and mlterm. You can also force auto mode to choose SIXEL for the current process with:
+
+```sh
+ARGENTWATCH_SIXEL=1 ./ArgentWatch
+```
+
+In fish:
+
+```fish
+set -x ARGENTWATCH_SIXEL 1
+./ArgentWatch
+```
+
+SIXEL images are scaled to the gotui preview pane and capped by `sixel_max_width` / `sixel_max_height`. The `cell_width_px` and `cell_height_px` values are only used to estimate how many bitmap pixels fit inside a character-cell pane; if the picture overlaps a border in a terminal with unusual font metrics, adjust those two values. `refresh_ms` controls only display refresh and has no effect on camera capture, motion detection, or evidence recording.
+
+SIXEL support itself is part of the terminal protocol. In DEC/xterm device attributes, capability code `4` identifies SIXEL graphics support. ArgentWatch does not currently issue a live DA query because gotui/tcell owns terminal input while the dashboard is active; explicit `mode = "sixel"` is therefore the reliable override for terminals that do not advertise SIXEL through their environment.
 
 ## Motion detection
 

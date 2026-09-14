@@ -55,6 +55,8 @@ type Runtime struct {
 	ring        *frameRing
 	active      *incident
 	lastTrigger time.Time
+	previewJPEG []byte
+	previewAt   time.Time
 	wg          sync.WaitGroup
 	done        chan struct{}
 }
@@ -150,6 +152,18 @@ func (r *Runtime) Snapshot() Snapshot {
 	s.Events = append([]store.Event(nil), r.snap.Events...)
 	s.Logs = append([]string(nil), r.snap.Logs...)
 	return s
+}
+
+// PreviewFrame returns a stable copy of the most recent camera JPEG for rich
+// terminal previews such as SIXEL. The capture loop owns the original frame
+// storage, so callers never receive a mutable camera buffer.
+func (r *Runtime) PreviewFrame() ([]byte, time.Time) {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	if len(r.previewJPEG) == 0 {
+		return nil, time.Time{}
+	}
+	return append([]byte(nil), r.previewJPEG...), r.previewAt
 }
 
 func (r *Runtime) logf(format string, args ...any) {
@@ -341,6 +355,8 @@ func (r *Runtime) ingest(ctx context.Context, f frame, m motion.Result) {
 	r.snap.LastFrame = f.at
 	r.snap.MotionScore = m.Score
 	r.snap.Preview = m.Preview
+	r.previewJPEG = f.jpeg
+	r.previewAt = f.at
 	if r.active != nil {
 		r.active.frames = append(r.active.frames, frame{jpeg: append([]byte(nil), f.jpeg...), at: f.at})
 		if m.Score > r.active.peak {

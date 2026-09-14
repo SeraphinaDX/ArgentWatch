@@ -3,22 +3,40 @@
 package dashboard
 
 import (
+	"bytes"
 	"context"
 	"fmt"
+	"os"
 	"path/filepath"
 	"strings"
 	"time"
 
 	"git.cerberusgames.ca/Starstreak/ArgentWatch/internal/app"
+	"git.cerberusgames.ca/Starstreak/ArgentWatch/internal/config"
+	"git.cerberusgames.ca/Starstreak/ArgentWatch/internal/sixel"
 	ui "github.com/metaspartan/gotui/v5"
 	"github.com/metaspartan/gotui/v5/widgets"
 )
+
+type previewRect struct {
+	row, col   int
+	cols, rows int
+}
+
+type sixelDisplay struct {
+	lastDraw  time.Time
+	lastFrame time.Time
+}
 
 func Run(ctx context.Context, cancel context.CancelFunc, rt *app.Runtime) error {
 	if err := ui.Init(); err != nil {
 		return err
 	}
 	defer ui.Close()
+
+	cfg := rt.Config()
+	previewMode := resolvePreviewMode(cfg.Preview)
+	sixelView := &sixelDisplay{}
 
 	events := ui.PollEvents()
 	shutdownSignal := ctx.Done()
@@ -34,7 +52,10 @@ func Run(ctx context.Context, cancel context.CancelFunc, rt *app.Runtime) error 
 		rt.BeginShutdown()
 		cancel()
 		shutdownSignal = nil
-		render(rt.Snapshot(), rt.Config().General.Location, rt.Config().General.OutputDir)
+		rect := render(rt.Snapshot(), cfg.General.Location, cfg.General.OutputDir, previewMode)
+		if previewMode == "sixel" {
+			sixelView.draw(rt, rect, cfg.Preview, true)
+		}
 	}
 
 	for {
@@ -54,12 +75,103 @@ func Run(ctx context.Context, cancel context.CancelFunc, rt *app.Runtime) error 
 				requestShutdown()
 			}
 		case <-tick.C:
-			render(rt.Snapshot(), rt.Config().General.Location, rt.Config().General.OutputDir)
+			rect := render(rt.Snapshot(), cfg.General.Location, cfg.General.OutputDir, previewMode)
+			if previewMode == "sixel" {
+				sixelView.draw(rt, rect, cfg.Preview, false)
+			}
 		}
 	}
 }
 
-func render(s app.Snapshot, location, outputDir string) {
+func (d *sixelDisplay) draw(rt *app.Runtime, rect previewRect, cfg config.PreviewConfig, force bool) {
+	if rect.cols < 1 || rect.rows < 1 {
+		return
+	}
+	now := time.Now()
+	refresh := time.Duration(cfg.RefreshMS) * time.Millisecond
+	if !force && !d.lastDraw.IsZero() && now.Sub(d.lastDraw) < refresh {
+		return
+	}
+	jpegFrame, frameAt := rt.PreviewFrame()
+	if len(jpegFrame) == 0 {
+		return
+	}
+	// If gotui did not repaint the preview cells, an unchanged camera frame is
+	// already visible as SIXEL and does not need to be transmitted again.
+	if !force && frameAt.Equal(d.lastFrame) {
+		return
+	}
+
+	maxWidth := rect.cols * cfg.CellWidthPX
+	maxHeight := rect.rows * cfg.CellHeightPX
+	if maxWidth > cfg.SixelMaxWidth {
+		maxWidth = cfg.SixelMaxWidth
+	}
+	if maxHeight > cfg.SixelMaxHeight {
+		maxHeight = cfg.SixelMaxHeight
+	}
+	if maxWidth < 1 || maxHeight < 1 {
+		return
+	}
+
+	var image bytes.Buffer
+	if _, _, err := sixel.EncodeJPEG(&image, jpegFrame, maxWidth, maxHeight); err != nil {
+		return
+	}
+	// Save/restore the cursor around the DCS graphic. SIXEL terminals draw the
+	// bitmap at the current cursor position; gotui remains responsible for the
+	// surrounding borders, status widgets, input polling, and alternate screen.
+	var out bytes.Buffer
+	out.WriteString("\x1b7")
+	fmt.Fprintf(&out, "\x1b[%d;%dH", rect.row, rect.col)
+	out.Write(image.Bytes())
+	out.WriteString("\x1b8")
+	if _, err := os.Stdout.Write(out.Bytes()); err != nil {
+		return
+	}
+	d.lastDraw = now
+	d.lastFrame = frameAt
+}
+
+func resolvePreviewMode(cfg config.PreviewConfig) string {
+	mode := strings.ToLower(strings.TrimSpace(cfg.Mode))
+	switch mode {
+	case "sixel", "text", "off":
+		return mode
+	case "auto", "":
+		if likelySixelTerminal() {
+			return "sixel"
+		}
+		return "text"
+	default:
+		return "text"
+	}
+}
+
+func likelySixelTerminal() bool {
+	// Explicit environment override is useful for terminals whose TERM value is
+	// deliberately generic (for example xterm-256color).
+	switch strings.ToLower(strings.TrimSpace(os.Getenv("ARGENTWATCH_SIXEL"))) {
+	case "1", "true", "yes", "on":
+		return true
+	case "0", "false", "no", "off":
+		return false
+	}
+	term := strings.ToLower(os.Getenv("TERM"))
+	if strings.Contains(term, "sixel") {
+		return true
+	}
+	// Keep auto-detection intentionally conservative. A terminal can advertise
+	// xterm compatibility without actually enabling SIXEL. Users can always set
+	// preview.mode="sixel" when their terminal supports it under a generic TERM.
+	if os.Getenv("KONSOLE_VERSION") != "" {
+		return true
+	}
+	program := strings.ToLower(os.Getenv("TERM_PROGRAM"))
+	return strings.Contains(program, "mlterm") || strings.Contains(program, "wezterm")
+}
+
+func render(s app.Snapshot, location, outputDir, previewMode string) previewRect {
 	w, h := ui.TerminalDimensions()
 	if w < 70 || h < 22 {
 		p := widgets.NewParagraph()
@@ -68,7 +180,7 @@ func render(s app.Snapshot, location, outputDir string) {
 		p.SetRect(0, 0, w, h)
 		p.BorderStyle.Fg = ui.ColorHotPink
 		ui.Render(p)
-		return
+		return previewRect{}
 	}
 	left := w * 2 / 3
 	topH := 10
@@ -151,8 +263,19 @@ func render(s app.Snapshot, location, outputDir string) {
 	alert.BorderStyle.Fg = ui.ColorPurple
 
 	preview := widgets.NewParagraph()
-	preview.Title = " Camera Preview / Luma "
-	preview.Text = s.Preview
+	switch previewMode {
+	case "sixel":
+		preview.Title = " Camera Preview / SIXEL "
+		if s.LastFrame.IsZero() {
+			preview.Text = "Waiting for first camera frame..."
+		}
+	case "off":
+		preview.Title = " Camera Preview / Disabled "
+		preview.Text = "Preview disabled by [preview] mode = \"off\".\nMotion detection and recording remain active."
+	default:
+		preview.Title = " Camera Preview / Luma "
+		preview.Text = s.Preview
+	}
 	preview.SetRect(0, topH, left, footerY)
 	preview.BorderStyle.Fg = ui.ColorMagenta
 	preview.TextStyle = ui.NewStyle(ui.ColorLightGrey)
@@ -166,17 +289,26 @@ func render(s app.Snapshot, location, outputDir string) {
 	history.TextStyle = ui.NewStyle(ui.ColorWhite)
 
 	footer := widgets.NewParagraph()
-	footer.Text = " q Quit   •   clips: " + filepath.Clean(outputDir) + "   •   persistent event history enabled "
+	footer.Text = " q Quit   •   preview: " + strings.ToUpper(previewMode) + "   •   clips: " + filepath.Clean(outputDir) + " "
 	if s.ShuttingDown {
 		footer.Text = fmt.Sprintf("Quit requested — finalizing %d clip(s), %d task(s).\nDO NOT terminate the process; ArgentWatch will exit automatically when safe.", s.FinalizingClips, s.PendingTasks)
 	} else if len(s.Logs) > 0 {
-		footer.Text = s.Logs[len(s.Logs)-1] + "\nq Quit"
+		footer.Text = s.Logs[len(s.Logs)-1] + "\nq Quit • preview: " + strings.ToUpper(previewMode)
 	}
 	footer.SetRect(0, footerY, w, h)
 	footer.Border = false
 	footer.TextStyle = ui.NewStyle(ui.ColorGrey)
 
 	ui.Render(status, gauge, alert, preview, history, footer)
+
+	// ANSI cursor coordinates are 1-based. Leave an extra cell of padding on
+	// the right/bottom so font-metric rounding cannot paint over gotui borders.
+	return previewRect{
+		row:  topH + 2,
+		col:  2,
+		cols: maxInt(1, left-3),
+		rows: maxInt(1, footerY-topH-3),
+	}
 }
 
 func eventRows(s app.Snapshot) []string {
@@ -221,4 +353,11 @@ func displayDevice(device string) string {
 		return "probing..."
 	}
 	return device
+}
+
+func maxInt(a, b int) int {
+	if a > b {
+		return a
+	}
+	return b
 }
