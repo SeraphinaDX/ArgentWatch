@@ -19,6 +19,13 @@ ZGO_BIN=${ZGO:-zgo}
 ZIG_BIN=${ZIG:-zig}
 GO_BIN=${GO:-go}
 
+# Archive extraction, file copying, or some source-control settings can strip
+# executable bits from shell helpers.  The Makefile invokes this selector
+# through /bin/sh, and we repair the helper modes here before Go/CGO needs to
+# execute them directly.  Failure to chmod (for example on a read-only tree)
+# is non-fatal; the external-zgo and ordinary-Go paths can still work.
+chmod +x "$SCRIPT_DIR/zgo" "$SCRIPT_DIR/zig-cc" "$SCRIPT_DIR/zig-cxx" 2>/dev/null || true
+
 have_cmd() {
     command -v "$1" >/dev/null 2>&1
 }
