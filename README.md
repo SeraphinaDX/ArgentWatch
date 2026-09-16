@@ -11,6 +11,7 @@ ArgentWatch is a Linux webcam intrusion monitor written in Go. It watches a V4L2
 - **Useful alerts:** Gotify fires immediately when an intrusion begins; e-mail fires after the evidence clip has been finalized so an external sender can attach it.
 - **Persistent history:** completed incidents are appended to `events.jsonl` and reloaded in the TUI after restart.
 - **Evidence timestamps:** every saved video frame can carry its own visible date/time overlay using a built-in bitmap font, with no system-font dependency.
+- **Real-time clip pacing:** WebM presentation timestamps are derived from each frame's actual capture time instead of assuming the webcam always achieves its advertised FPS. Dropped or irregular frames therefore do not make evidence footage play too fast or too slow.
 - **Safe visible shutdown:** quitting keeps the TUI/headless status alive while evidence clips and alert tasks finish, and exits automatically only when finalization is complete.
 - **SIXEL-capable live preview:** terminals with SIXEL support can show a real colour camera image inside the gotui dashboard. The encoder is pure Go and the existing text/luminance preview remains the fallback.
 - **No shell execution:** the e-mail command is executed directly with argument placeholders rather than via `/bin/sh`.

@@ -489,7 +489,17 @@ func (r *Runtime) finalize(ctx context.Context, inc *incident) {
 		Width: width, Height: height, FPS: fps, Bitrate: r.cfg.Clip.Bitrate,
 		TimestampOverlay: r.cfg.Clip.TimestampOverlay, TimestampFormat: r.cfg.Clip.TimestampFormat,
 	}
-	r.logf("encoding %s (%d frames)", inc.id, len(frames))
+	if len(frames) > 1 && !frames[0].At.IsZero() && !frames[len(frames)-1].At.IsZero() {
+		span := frames[len(frames)-1].At.Sub(frames[0].At)
+		if span > 0 {
+			effectiveFPS := float64(len(frames)-1) / span.Seconds()
+			r.logf("encoding %s (%d frames, %.2fs capture span, %.2f effective fps)", inc.id, len(frames), span.Seconds(), effectiveFPS)
+		} else {
+			r.logf("encoding %s (%d frames)", inc.id, len(frames))
+		}
+	} else {
+		r.logf("encoding %s (%d frames)", inc.id, len(frames))
+	}
 	err := recorder.WriteWebM(ctx, path, frames)
 	e := store.Event{ID: inc.id, StartedAt: inc.started, SavedAt: time.Now(), Location: r.cfg.General.Location, PeakScore: inc.peak}
 	if err != nil {

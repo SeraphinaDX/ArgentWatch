@@ -56,10 +56,14 @@ func (r Recorder) WriteWebM(ctx context.Context, path string, frames []JPEGFrame
 		}
 	}()
 
+	timing := buildFrameTiming(frames, r.FPS)
+	// Microseconds are fine-grained enough for webcam capture timing while
+	// keeping timestamp values compact. WebM/VP8 will rescale these as needed.
+	base := av.TimeBase{Num: 1, Den: 1_000_000}
+
 	input := goav.Source("camera",
 		shape.Frame(av.MediaVideo, shape.Video(r.Width, r.Height, av.PixelFormatI420), shape.Stream(av.StreamID("camera"))),
 		func(ctx context.Context, push source.Push) error {
-			base := av.TimeBase{Num: 1, Den: int64(r.FPS)}
 			for i, jf := range frames {
 				if err := ctx.Err(); err != nil {
 					return err
@@ -89,8 +93,8 @@ func (r Recorder) WriteWebM(ctx context.Context, path string, frames []JPEGFrame
 						{Buffer: av.Buffer{Bytes: u, Ownership: av.BufferImmutable}, Stride: r.Width / 2},
 						{Buffer: av.Buffer{Bytes: v, Ownership: av.BufferImmutable}, Stride: r.Width / 2},
 					},
-					PTS:      av.Timestamp{Value: int64(i), Base: base},
-					Duration: av.Duration{Value: 1, Base: base},
+					PTS:      av.Timestamp{Value: timing[i].PTS.Microseconds(), Base: base},
+					Duration: av.Duration{Value: timing[i].Duration.Microseconds(), Base: base},
 				}
 				if _, err := push.Frame(&frame); err != nil {
 					return err
